@@ -53,6 +53,7 @@ class FormKeuangan extends StatefulWidget {
 class _FormKeuanganState extends State<FormKeuangan> {
   final _itemController = TextEditingController();
   final _jumlahController = TextEditingController();
+  DateTime selectedDate = DateTime.now();
 
   bool _isLoading = false;
 
@@ -63,10 +64,16 @@ class _FormKeuanganState extends State<FormKeuangan> {
 
   Future<void> simpanData() async {
     if (_itemController.text.isEmpty || _jumlahController.text.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("Isi semua data")));
-      return;
+      await http.post(
+        Uri.parse(urlScript),
+        body: {
+          "action": "add",
+          "tanggal": selectedDate.toIso8601String(),
+          "item": _itemController.text,
+          "jumlah": _jumlahController.text,
+          "kategori": _kategori,
+        },
+      );
     }
 
     setState(() {
@@ -124,6 +131,28 @@ class _FormKeuanganState extends State<FormKeuangan> {
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 30),
+
+              ListTile(
+                leading: const Icon(Icons.calendar_today),
+                title: const Text("Tanggal"),
+                subtitle: Text(
+                  "${selectedDate.day}-${selectedDate.month}-${selectedDate.year}",
+                ),
+                onTap: () async {
+                  DateTime? picked = await showDatePicker(
+                    context: context,
+                    initialDate: selectedDate,
+                    firstDate: DateTime(2020),
+                    lastDate: DateTime(2100),
+                  );
+
+                  if (picked != null) {
+                    setState(() {
+                      selectedDate = picked;
+                    });
+                  }
+                },
+              ),
 
               TextField(
                 controller: _itemController,
@@ -203,11 +232,23 @@ class RiwayatKeuangan extends StatefulWidget {
 
 class _RiwayatKeuanganState extends State<RiwayatKeuangan> {
   final String urlScript =
-      "https://script.google.com/macros/s/AKfycbyP6PyWcT3OE-yX62vpaPtxxJGcQeMkjBOpZQ1J-t1Usb5lL0nk19y8lIAWfZnnKHti/exec";
+      "https://script.google.com/macros/s/AKfycbyP6PyWcT3OE-yX62vpaPtxxJGcQeMkjBOpZQ1J-t1Usb5lL0nk19y8lIAWfZnnKHti/exec"; // Pastikan URL benar
+  late Future<List<dynamic>> _dataFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshData();
+  }
+
+  void _refreshData() {
+    setState(() {
+      _dataFuture = fetchRawData();
+    });
+  }
 
   Future<List<dynamic>> fetchRawData() async {
     final response = await http.get(Uri.parse(urlScript));
-
     if (response.statusCode == 200) {
       return json.decode(response.body);
     } else {
@@ -215,21 +256,104 @@ class _RiwayatKeuanganState extends State<RiwayatKeuangan> {
     }
   }
 
+  Future<void> deleteData(int row) async {
+    showDialog(
+      context: context,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
+
+    await http.post(
+      Uri.parse(urlScript),
+      body: {"action": "delete", "row": row.toString()},
+    );
+
+    // ignore: use_build_context_synchronously
+    Navigator.pop(context); // Tutup loading
+    _refreshData(); // Ambil data terbaru
+  }
+
+  // Menampilkan Dialog Edit
+  void showEditDialog(Map item) {
+    final editItem = TextEditingController(text: item['item'].toString());
+    final editJumlah = TextEditingController(text: item['jumlah'].toString());
+    String editKategori = item['kategori'].toString();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Edit Transaksi"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: editItem,
+              decoration: const InputDecoration(labelText: "Nama"),
+            ),
+            TextField(
+              controller: editJumlah,
+              decoration: const InputDecoration(labelText: "Jumlah"),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Batal"),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await updateData(
+                item['row'],
+                editItem.text,
+                editJumlah.text,
+                editKategori,
+                DateTime.now(),
+              );
+            },
+            child: const Text("Simpan"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> updateData(
+    int row,
+    String item,
+    String jumlah,
+    String kategori,
+    DateTime tanggal,
+  ) async {
+    await http.post(
+      Uri.parse(urlScript),
+      body: {
+        "action": "update",
+        "row": row.toString(),
+        "tanggal": tanggal.toIso8601String(),
+        "item": item,
+        "jumlah": jumlah,
+        "kategori": kategori,
+      },
+    );
+    _refreshData();
+  }
+
   @override
   Widget build(BuildContext context) {
     return RefreshIndicator(
-      onRefresh: () async {
-        setState(() {});
-      },
+      onRefresh: () async => _refreshData(),
       child: FutureBuilder<List<dynamic>>(
-        future: fetchRawData(),
+        future: _dataFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
-
-          if (snapshot.hasError) {
-            return Center(child: Text("Error: ${snapshot.error}"));
+          if (snapshot.hasError || snapshot.data == null) {
+            return const Center(
+              child: Text("Gagal memuat data atau data kosong"),
+            );
           }
 
           final data = snapshot.data!.reversed.toList();
@@ -238,35 +362,27 @@ class _RiwayatKeuanganState extends State<RiwayatKeuangan> {
             itemCount: data.length,
             itemBuilder: (context, index) {
               final item = data[index];
-
               final isPengeluaran = item['kategori'] == "Pengeluaran";
 
-              DateTime tanggal =
-                  DateTime.tryParse(item['tanggal'].toString()) ??
-                  DateTime.now();
-
               return ListTile(
-                leading: CircleAvatar(
-                  backgroundColor: isPengeluaran
-                      ? Colors.red[50]
-                      : Colors.green[50],
-                  child: Icon(
-                    isPengeluaran
-                        ? Icons.upload_rounded
-                        : Icons.download_rounded,
-                    color: isPengeluaran ? Colors.red : Colors.green,
-                  ),
+                leading: Icon(
+                  isPengeluaran ? Icons.upload : Icons.download,
+                  color: isPengeluaran ? Colors.red : Colors.green,
                 ),
                 title: Text(item['item'].toString()),
-                subtitle: Text(
-                  "${tanggal.day}-${tanggal.month}-${tanggal.year}",
-                ),
-                trailing: Text(
-                  "${isPengeluaran ? '-' : '+'} Rp ${item['jumlah']}",
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: isPengeluaran ? Colors.red : Colors.green,
-                  ),
+                subtitle: Text("Rp ${item['jumlah']}"),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.blue),
+                      onPressed: () => showEditDialog(item),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => deleteData(item['row']),
+                    ),
+                  ],
                 ),
               );
             },
